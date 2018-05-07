@@ -12,7 +12,7 @@ const {
   MONGO_URL,
   MONGO_COLLECTION
 } = require('./config');
-const { getPartition } = require('./utils');
+const { getPartition, getBusinessRulesOfEvent } = require('./utils');
 const client = new kafka.Client();
 const consumerGroup = new kafka.ConsumerGroupStream(
   {
@@ -31,16 +31,6 @@ var redisClient = require('redis').createClient();
 const _ = require('lodash');
 
 var MongoClient = require('mongodb').MongoClient;
-
-const noop = () => {};
-
-function BusinessError(msg) {
-  return new Error(msg);
-}
-
-function throwIf(val, error) {
-  if (val) throw error;
-}
 
 class Response {
   static Pass(doc) {
@@ -61,11 +51,6 @@ class Response {
 Response.errors = {
   PROCESSING_ERROR: 'PROCESSING_ERROR'
 };
-
-const sleep = time =>
-  new Promise(resolve => {
-    setTimeout(resolve, time);
-  });
 
 const reducer = (state, key) => () => {
   state[key] = state[key] + 1;
@@ -111,17 +96,15 @@ async function processTask(deps, message, payload) {
   await deps.producer([
     {
       topic: TOPIC_EVENTS,
-      messages: [
-        message.value
-      ],
+      messages: [message.value],
       key: message.key
     }
   ]); // forward message to final event store
-  await deps.commit(message, true); // commit offset
   await deps.pubsub(
     PUBSUB_TOPIC + ':' + payload.requestId,
     JSON.stringify(res)
   );
+  await deps.commit(message, true); // commit offset
   return message;
 }
 
@@ -179,61 +162,37 @@ async function createAggregate(deps, payload, agg) {
   return await deps.mongo.insert(agg);
 }
 
-const mustExists = (payload, agg) => throwIf(!agg, BusinessError('NOT_FOUND'));
-const mustBeCleanerOfJob = (payload, agg) =>
-  throwIf(
-    agg.cleaners.indexOf(payload.cleanerId) === -1,
-    BusinessError('MUST_BE_CLEANER_OF_JOB')
-  );
-const notYetAnswered = (payload, agg) => {
-  throwIf(
-    agg.answers[payload.cleanerId],
-    BusinessError('YOU_ALREADY_ANSWERED')
-  );
-};
-const jobNotYetAccepted = (payload, agg) => {
-  throwIf(agg.acceptedCleaner, BusinessError('JOB_ALREADY_ACCEPTED'));
-};
-
 function reduceBr(array) {
   return (deps, payload, agg) => {
     _.each(array, f => f(payload, agg));
   };
 }
 
-const businessLogic = {
-  accepteJobRequest: reduceBr([mustExists, mustBeCleanerOfJob, notYetAnswered, jobNotYetAccepted]),
-  declineJobRequest: reduceBr([mustExists, mustBeCleanerOfJob, notYetAnswered])
-};
+async function createHandler(deps, payload, message) {
+  const dup = await duplicationCheck(deps, payload);
+  if (dup) return Response.Pass(dup);
+  const [err] = runBusinessLogic(deps, payload, {});
+  if (err) return Response.Fail(message, err);
+  const newAgg = aggregateReducer(payload, {});
+  await createAggregate(deps, payload, newAgg);
+  return Response.Success(newAgg);
+}
+
+async function defaultHandler(deps, payload, message) {
+  const dup = await duplicationCheck(deps, payload);
+  if (dup) return Response.Pass(dup);
+  const agg = await loadAggregate(deps, payload);
+  const [err] = runBusinessLogic(deps, payload, agg);
+  if (err) return Response.Fail(message, err);
+  const newAgg = aggregateReducer(payload, agg);
+  await updateAggregate(deps, payload, newAgg);
+  return Response.Success(newAgg);
+}
 
 const eventActions = {
-  createJobRequest: async (deps, payload) => {
-    const dup = await duplicationCheck(deps, payload);
-    if (dup) return Response.Pass(dup);
-    const newAgg = aggregateReducer(payload, {});
-    await createAggregate(deps, payload, newAgg);
-    return Response.Success(newAgg);
-  },
-  accepteJobRequest: async (deps, payload, message) => {
-    const dup = await duplicationCheck(deps, payload);
-    if (dup) return Response.Pass(dup);
-    const agg = await loadAggregate(deps, payload);
-    const [err] = runBusinessLogic(deps, payload, agg);
-    if (err) return Response.Fail(message, err);
-    const newAgg = aggregateReducer(payload, agg);
-    await updateAggregate(deps, payload, newAgg);
-    return Response.Success(newAgg);
-  },
-  declineJobRequest: async (deps, payload, message) => {
-    const dup = await duplicationCheck(deps, payload);
-    if (dup) return Response.Pass(dup);
-    const agg = await loadAggregate(deps, payload);
-    const [err] = runBusinessLogic(deps, payload, agg);
-    if (err) return Response.Fail(message, err);
-    const newAgg = aggregateReducer(payload, agg);
-    await updateAggregate(deps, payload, newAgg);
-    return Response.Success(newAgg);
-  }
+  createJobRequest: createHandler,
+  accepteJobRequest: defaultHandler,
+  declineJobRequest: defaultHandler
 };
 
 function aggregateReducer(payload, agg) {
@@ -260,9 +219,9 @@ function aggregateReducer(payload, agg) {
 }
 
 function runBusinessLogic(deps, payload, agg) {
-  const resolvedAction = deps.getHandler('businessLogic', payload.eventId);
+  const rules = deps.getBusinessRulesOfEvent(payload.eventId);
   try {
-    resolvedAction(deps, payload, agg);
+    reduceBr(rules)(deps, payload, agg);
     return [];
   } catch (e) {
     return [e.message];
@@ -308,10 +267,10 @@ connectMongo(mongo => {
       producer: Bluebird.promisify(producer.send.bind(producer)),
       mongo,
       stream: consumerGroup,
+      getBusinessRulesOfEvent,
       getHandler: resolveHandler({
-        eventActions,
-        businessLogic
+        eventActions
       })
-    }).subscribe(noop);
+    }).subscribe(_.noop);
   });
 });

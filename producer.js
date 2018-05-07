@@ -1,14 +1,16 @@
 const Rx = require('rxjs/Rx');
 const inquirer = require('inquirer');
 const Bluebird = require('bluebird');
-let Validator = require('fastest-validator');
 const request = require('request');
 var shortid = require('shortid');
-const v = new Validator();
 
-const events = require('./events');
-const mockData = require('./mockdata');
 const { ENDPOINT_URL } = require('./config');
+const {
+  isValidEvent,
+  getEventIds,
+  getEventMockFunc,
+  getEventSchema
+} = require('./utils');
 
 const askSendRequest = {
   name: 'request',
@@ -24,7 +26,7 @@ const askWhichEvent = {
   name: 'eventId',
   type: 'list',
   message: 'EventId',
-  choices: Object.keys(events)
+  choices: getEventIds()
 };
 
 var prompts = new Rx.Subject();
@@ -37,8 +39,7 @@ function reducer(state = {}) {
 
 function mapEventIdToData(eventId) {
   const questions = [];
-  const eventResolved = events[eventId];
-  if (!eventResolved) throw new Error('event not found');
+  const eventResolved = getEventSchema(eventId);
   Object.keys(eventResolved).forEach(key => {
     const val = eventResolved[key];
     if (val.type === 'string') {
@@ -49,19 +50,17 @@ function mapEventIdToData(eventId) {
       });
     }
   });
-  return { questions, schema: eventResolved };
+  return { questions };
 }
 
 function mapEventIdToMockData(eventId, state) {
-  const resolvedMockDataFunc = mockData[eventId];
-  if (!resolvedMockDataFunc) throw new Error('mock data not found');
+  const resolvedMockDataFunc = getEventMockFunc(eventId);
   return resolvedMockDataFunc(state);
 }
 
 function validate(state, cb, cbFail) {
-  const { schema } = mapEventIdToData(state.eventId);
   const payload = mapEventIdToMockData(state.eventId, state);
-  if (v.validate(payload, schema) === true) {
+  if (isValidEvent(payload)) {
     cb(payload);
   } else {
     cbFail && cbFail();
@@ -113,11 +112,23 @@ function handleSendRequest(deps, ans) {
   }
 }
 
+function filterQuestions(eventId) {
+  return e => {
+    if (eventId === 'createJobRequest') {
+      return e.name !== 'eventId' && e.name !== 'jobRequestId'; // jobrequestid gets filled serverside
+    } else {
+      return e.name !== 'eventId';
+    }
+  };
+}
+
 function handleEventChoose(deps, ans) {
   deps.reduce(ans);
   deps.requestId = shortid.generate();
   const { questions } = mapEventIdToData(deps.state.eventId);
-  const filteredQuestions = questions.filter(e => e.name !== 'eventId'); // filter val which is set by first question
+  const filteredQuestions = questions.filter(
+    filterQuestions(deps.state.eventId)
+  ); // filter val which is set by first question
   filteredQuestions.forEach(e => deps.prompts.next(e));
   if (filteredQuestions.length === 0) {
     validate(deps.state, () => deps.prompts.next(askSendRequest));

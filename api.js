@@ -12,7 +12,7 @@ const {
   API_PORT,
   API_CON_TIMEOUT
 } = require('./config');
-const { getPartition } = require('./utils');
+const { getPartition, throwIf, isValidEvent } = require('./utils');
 
 var app = express();
 const client = new kafka.KafkaClient({ kafkaHost: KAFKA_HOST });
@@ -64,9 +64,10 @@ function createRemoteCall(requestId) {
 async function produceRouteHandler(req, res, next) {
   try {
     const payload = req.body;
-    // TODO: validate payload
-    const remoteCall = createRemoteCall(payload.requestId);
     const enrichedPayload = enrichPayloadMaybe(payload);
+    throwIf(!isValidEvent(enrichedPayload), new Error('EVENT_NOT_VALID'))
+    console.log('request -> ', enrichedPayload);
+    const remoteCall = createRemoteCall(payload.requestId);
     const [
       kafkaCallResult,
       remoteCallResult,
@@ -86,7 +87,7 @@ async function produceRouteHandler(req, res, next) {
       Bluebird.race([remoteCall, timeout(API_CON_TIMEOUT)])
     ]);
     if (remoteCallResult.res === 'FAIL') {
-      throw new Error(e.message); // blubble up
+      throw new Error(remoteCallResult.error); // blubble up
     } else {
       res.json({ ok: true, remoteCallResult });
     }
