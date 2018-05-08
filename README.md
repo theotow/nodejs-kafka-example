@@ -19,6 +19,11 @@ Create Kafka Topics
     docker run --rm -it --net=host landoop/fast-data-dev kafka-topics --zookeeper 127.0.0.1:2181 --topic requests --replication-factor 1 --partitions 100 --create
     docker run --rm -it --net=host landoop/fast-data-dev kafka-topics --zookeeper 127.0.0.1:2181 --topic finalevents --replication-factor 1 --partitions 100 --create
 
+Kafka UI
+
+   Visit http://127.0.0.1:3030 to inspect your kafka broker, topics, partitions etc.
+
+
 
 ## Usage
 

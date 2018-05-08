@@ -132,7 +132,7 @@ const connectMongo = function(cb) {
 
 async function duplicationCheck(deps, payload) {
   return await deps.mongo.findOne({
-    array: { $in: [payload.requestId] }
+    requestsHandled: { $in: [payload.requestId] }
   });
 }
 
@@ -195,13 +195,27 @@ const eventActions = {
   declineJobRequest: defaultHandler
 };
 
+function addRequestId(requestsHandled=[], requestId) {
+  if (!requestId) return requestsHandled; // if not defined skip
+  return _.uniq([...requestsHandled, requestId]);
+}
+
 function aggregateReducer(payload, agg) {
   switch (payload.eventId) {
     case 'accepteJobRequest': {
       return {
         ...agg,
         acceptedCleaner: payload.cleanerId,
-        answers: { ...agg.answers, [payload.cleanerId]: 'accepted' }
+        answers: { ...agg.answers, [payload.cleanerId]: 'accepted' },
+        requestsHandled: addRequestId(agg.requestsHandled, payload.requestId)
+      };
+    }
+    case 'declineJobRequest': {
+      return {
+        ...agg,
+        acceptedCleaner: payload.cleanerId,
+        answers: { ...agg.answers, [payload.cleanerId]: 'declined' },
+        requestsHandled: addRequestId(agg.requestsHandled, payload.requestId)
       };
     }
     case 'createJobRequest': {
@@ -209,7 +223,8 @@ function aggregateReducer(payload, agg) {
         cleaners: payload.cleaners,
         tasks: payload.tasks,
         jobRequestId: payload.jobRequestId,
-        answers: {}
+        answers: {},
+        requestsHandled: addRequestId(agg.requestsHandled, payload.requestId)
       };
     }
     default: {
